@@ -1,4 +1,5 @@
 import networkx as nx
+import pandas as pd
 import matplotlib.pyplot as plt
 from pyomo.environ import *
 from pyomo.opt import SolverFactory
@@ -7,13 +8,18 @@ import random
 from geopy.distance import great_circle
 from haversine import haversine
 import openrouteservice
+import os
+print("Directorio de trabajo:", os.getcwd())
 
 client = openrouteservice.Client(key='5b3ce3597851110001cf624857f9ba1e285e4965996cd6c08382472c')
+reabastecer = False  
+activar_ventanas_tiempo = False
+activar_particion = True
 
 # Creación del modelo en Pyomo
 Model = ConcreteModel()
 
-opcion = int(input("¿Desea ingresar los datos reales o utilizar los valores por defecto? \n1. Reales \n2. Por defecto\n"))
+opcion = 3
 
 if opcion == 1:
     # --------------------------------------------------------------------------------------------------------------------
@@ -166,7 +172,7 @@ elif opcion == 2:
     Nombre_vehiculo = ["V4"]
 
     # Demandas de los nodos
-    demanda = [0, 50, 10, 10] 
+    demanda = [0, 20, 10, 10] 
     for i in range(1, V+1):
         demanda.append(0)
 
@@ -304,7 +310,181 @@ elif opcion == 2:
     for (i, j), distancia in distancias.items():
         for k in K: 
             matriz_distancias[i-1, j-1, k-1] = distancia 
+elif opcion == 3:
+    # Parámetros generales
+    START_TIME = "07:45"  # Hora de inicio de operaciones (HH:MM)
+
+    # Carga de datos desde CSV
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    pa1   = os.path.join(script_dir, 'clients.csv')
+    pa2   = os.path.join(script_dir, 'depots.csv')
+    pa3   = os.path.join(script_dir, 'vehicles.csv')
+    clients_df = pd.read_csv(pa1)
+    depots_df = pd.read_csv(pa2)
+    vehicles_df = pd.read_csv(pa3)
+
+    # Número de nodos y clientes
+    demanda_clients = clients_df['Demand'].tolist()
+    n_clients = len(demanda_clients)
+    n_depots = len(depots_df)  # normalmente 1 centro de distribución
+
+    # Índices de nodos:
+    # Nodo 1..n_depots: depósitos; n_depots+1..n_depots+n_clients: clientes;
+    # nodos de reabastecimiento: copias del CD al final
+    n_initial = n_depots + n_clients
+    V = n_clients
+    n = n_initial + V
+    if reabastecer:
+        N = range(1, n + 1)
+    else:
+        N = range(1, n_initial + 1)
+
+    # Vehículos
+    Vehiculos = len(vehicles_df)
+    K = range(1, Vehiculos + 1)
+    Nombre_vehiculo = vehicles_df['VehicleID'].astype(str).tolist()
+
+    # Nodos de reabastecimiento y nodo de inicio
+    nodo_reabastecimiento = [n_initial + i for i in range(1, V+1)]
+    nodo_inicio = 1  # primer depósito
+
+    # Construcción de demandas: CD (0), luego clientes, luego reabastecimiento (0)
+    demanda = [0] * n_depots + demanda_clients + [0] * V
+
+    # Coordenadas reales de nodos
+    def build_coordinates():
+        coords = {}
+        # Depósitos
+        for idx, row in depots_df.iterrows():
+            coords[idx + 1] = (row['Latitude'], row['Longitude'])
+        # Clientes
+        for i, row in clients_df.iterrows():
+            coords[n_depots + i + 1] = (row['Latitude'], row['Longitude'])
+        # Reabastecimiento (mismos que el CD)
+        for i in range(1, V+1):
+            coords[n_initial + i] = coords[1]
+        return coords
+
+    coordenadas = build_coordinates()
+
+    # Variables de vehículos cargadas desde CSV; se asume que si 'Speed' no está vacío, es un dron
+    vehiculos_info = {}
+    for _, row in vehicles_df.iterrows():
+        vid = str(row['VehicleID'])
+        tipo = 'Dron' if not pd.isna(row.get('Speed')) else 'Camioneta'
+        vehiculos_info[vid] = {
+            'tipo': tipo,
+            'capacidad': float(row['Capacity']),
+            'rango': float(row['Range'])
+        }
+
+    # Factores de ajuste por tipo de vehículo
+    ajustes_vehiculo = {
+        'Camioneta': {'cost_factor': 1.2, 'time_factor': 0.9},
+        'Dron': {'cost_factor': 0.85, 'time_factor': 1.2}
+    }
+
+    # Factores de clima (usar condiciones reales o simuladas según necesidad)
+    factores_clima = {
+        'Normal': {'cost_factor': 1.0, 'time_factor': 1.0},
+        'Lluvia': {'cost_factor': 1.1, 'time_factor': 1.3},
+        'Nieve': {'cost_factor': 1.3, 'time_factor': 1.7},
+        'Tormenta': {'cost_factor': 1.5, 'time_factor': 2.0}
+    }
+    Condicion_Climatica = 'Normal'
+    factor_clima_cost = factores_clima[Condicion_Climatica]['cost_factor']
+    factor_clima_time = factores_clima[Condicion_Climatica]['time_factor']
+
+    # Costos operativos fijos (COP por km o unidad correspondiente)
+    Pf = 15000  # Precio del combustible (COP por litro)
+    Ft = 5000   # Tarifa de flete (COP por km)
+    Cm = 700    # Costo de mantenimiento (COP por km)
+    Seguros = 300  # Costo de seguros por km (COP)
+    Peajes = 2000  # Costo de peajes por km (COP)
+    Salarios = 8000  # Costo de salarios de conductor por km (COP)
+
+    # Cálculo de distancia según tipo de vehículo
+    def calcular_distancia(i, j, tipo):
+        coord_i = coordenadas[i]
+        coord_j = coordenadas[j]
+        if tipo == 'Dron':
+            return haversine(coord_i, coord_j)
+        else:
+            # terrestre: usar OpenRouteService o geopy como fallback
+            return great_circle(coord_i, coord_j).kilometers
+
+    # Inicialización de matrices: distancia, costo y tiempo
+    cost = np.zeros((n, n, Vehiculos))
+    tiempos_viaje = np.zeros((n, n, Vehiculos))
+    matriz_distancias = np.zeros((n, n, Vehiculos))
+
+    for k, vid in enumerate(Nombre_vehiculo):
+        tipo = vehiculos_info[vid]['tipo']
+        cap = vehiculos_info[vid]['capacidad']
+        rng = vehiculos_info[vid]['rango']
+        factor_cost = ajustes_vehiculo[tipo]['cost_factor'] * factor_clima_cost
+        factor_time = ajustes_vehiculo[tipo]['time_factor'] * factor_clima_time
+
+        for i in range(1, n+1):
+            for j in range(1, n+1):
+                if i != j:
+                    d = round(calcular_distancia(i, j, tipo), 2)
+                    matriz_distancias[i-1, j-1, k] = d
+                    # Cálculo de costo usando los valores fijos originales
+                    costo_unitario = Pf + Ft + Cm + Seguros + Peajes + Salarios
+                    cost[i-1, j-1, k] = d * costo_unitario * factor_cost
+                    # Cálculo de tiempo (en horas)
+                    speed = vehicles_df.loc[vehicles_df['VehicleID'] == int(vid), 'Speed'].values
+                    velocidad = float(speed[0]) if speed.size and not pd.isna(speed[0]) else 60
+                    tiempos_viaje[i-1, j-1, k] = round((d / velocidad) * factor_time, 2)
+
+    # Convertir matrices a listas para compatibilidad
+    cost = cost.tolist()
+    tiempos_viaje = tiempos_viaje.tolist()
+    matriz_distancias = matriz_distancias.tolist()
+
+    # Capacidades y rangos útiles por vehículo
+    Capacidad_util = {k+1: vehiculos_info[vid]['capacidad'] for k, vid in enumerate(Nombre_vehiculo)}
+    Distancia_util = {k+1: vehiculos_info[vid]['rango'] for k, vid in enumerate(Nombre_vehiculo)}
+
+    # Construcción de ventanas de tiempo
+    # Nodo 1: inicio 0, fin 12:00 PM
+    start_h, start_m = map(int, START_TIME.split(':'))
+    start_min = start_h * 60 + start_m
+    ventanas_tiempo = {}
+    ventanas_tiempo[1] = (0, 12 * 60)
+    # Clientes: ventanas relativas desde START_TIME
+    def parse_tw(tw_str):
+        s_str, e_str = tw_str.split('-')
+        sh, sm = map(int, s_str.split(':'))
+        eh, em = map(int, e_str.split(':'))
+        return (sh * 60 + sm, eh * 60 + em)
+    for idx, row in clients_df.iterrows():
+        node = n_depots + idx + 1
+        tw_start, tw_end = parse_tw(row['TimeWindow'])
+        rel_start = max(0, tw_start - start_min)
+        rel_end = max(0, tw_end - start_min)
+        ventanas_tiempo[node] = (rel_start, rel_end)
+    # Nodos de reabastecimiento: misma ventana que CD
+    for node in nodo_reabastecimiento:
+        ventanas_tiempo[node] = ventanas_tiempo[1]
+
+    # Verificación final
+    def verify_load():
+        try:
+            assert len(demanda) == n, "Vector de demanda con longitud incorrecta"
+            assert cost and tiempos_viaje and matriz_distancias, "Matrices no inicializadas"
+            assert len(ventanas_tiempo) == n, "Ventanas de tiempo faltantes"
+            print("✅ Check: todo fue cargado e inicializado correctamente.")
+        except AssertionError as e:
+            print(f"❌ Error en verificación: {e}")
+
+    if __name__ == "__main__":
+        verify_load()
     # ------------------------------------------------------------------------------------------------------------------------
+
+
+
 
 # VARIABLES DEL MODELO
 Model.x = Var(N, N, K, domain=Binary)  # Variable binaria de decisión (ruta)
@@ -328,43 +508,45 @@ for k in K:
     Model.u[nodo_inicio, k].fix(1)  # Numerado de nodos
     Model.t[nodo_inicio, k].fix(ventanas_tiempo[nodo_inicio][0]) # Tiempo de inicio
 
-for k in K:
-    for i in nodo_reabastecimiento:
-        Model.carga[i, k].fix(0)  
+if reabastecer:
+    for k in K:
+        for i in nodo_reabastecimiento:
+            Model.carga[i, k].fix(0)  
 # --------------------------------------------------------------------------------------------------------------------
 
 
 # Restricciones de tiempo de viaje
 # --------------------------------------------------------------------------------------------------------------------
 
-# Máximo tiempo de viaje permitido
-M = max(sum(row) for matrix in tiempos_viaje for row in matrix)
-def restriccion_tiempo_viaje(Model, i, j, k):
-    if i != j and j != nodo_inicio and j not in nodo_reabastecimiento:
-        return Model.t[j, k] >= Model.t[i, k] + tiempos_viaje[i-1][j-1][k-1]*Model.x[i, j, k] - (1 - Model.x[i, j, k]) * M
-    else:
-        return Constraint.Skip
-    
+if activar_ventanas_tiempo:
+    # Máximo tiempo de viaje permitido
+    M = max(sum(row) for matrix in tiempos_viaje for row in matrix)*1000
+    def restriccion_tiempo_viaje(Model, i, j, k):
+        if i != j and j != nodo_inicio and j not in nodo_reabastecimiento:
+            return Model.t[j, k] >= Model.t[i, k] + tiempos_viaje[i-1][j-1][k-1]*Model.x[i, j, k] - (1 - Model.x[i, j, k]) * M
+        else:
+            return Constraint.Skip
+        
 
-Model.tiempo_viaje = Constraint(N, N, K, rule=restriccion_tiempo_viaje)
+    Model.tiempo_viaje = Constraint(N, N, K, rule=restriccion_tiempo_viaje)
 
-# Restricción de tiempo máximo permitido
-def restriccion_tiempo_max(Model, j, k):
-    if j != nodo_inicio and j not in nodo_reabastecimiento:
-        return Model.t[j, k] <= ventanas_tiempo[j][1]
-    else:
-        return Constraint.Skip
+    # Restricción de tiempo máximo permitido
+    def restriccion_tiempo_max(Model, j, k):
+        if j != nodo_inicio and j not in nodo_reabastecimiento:
+            return Model.t[j, k] <= ventanas_tiempo[j][1]
+        else:
+            return Constraint.Skip
 
-Model.tiempo_max = Constraint(N, K, rule=restriccion_tiempo_max)
+    Model.tiempo_max = Constraint(N, K, rule=restriccion_tiempo_max)
 
-# Restricción de tiempo mínimo permitido
-def restriccion_tiempo_min(Model, j, k):
-    if j != nodo_inicio and j not in nodo_reabastecimiento:
-        return Model.t[j, k] >= sum(ventanas_tiempo[j][0]*Model.x[i, j, k] for i in N if i != j)
-    else:
-        return Constraint.Skip
+    # Restricción de tiempo mínimo permitido
+    def restriccion_tiempo_min(Model, j, k):
+        if j != nodo_inicio and j not in nodo_reabastecimiento:
+            return Model.t[j, k] >= sum(ventanas_tiempo[j][0]*Model.x[i, j, k] for i in N if i != j)
+        else:
+            return Constraint.Skip
 
-Model.tiempo_min = Constraint(N, K, rule=restriccion_tiempo_min)
+    Model.tiempo_min = Constraint(N, K, rule=restriccion_tiempo_min)
 # --------------------------------------------------------------------------------------------------------------------
 
 
@@ -378,34 +560,34 @@ def restriccion_carga(Model, i, j, k):
         return Constraint.Skip
 Model.capacidad_acumulada = Constraint(N, N, K, rule=restriccion_carga)
 
+if activar_particion:
+    # Restricción para inicializar la variable auxiliar z si un trabajador k visita el nodo j
+    """ Asegurar que z[j, k] = 1 si el nodo j es visitado por el vehículo k y z[j, k] = 0 en caso contrario. """
+    def def_z(Model, j, k):
+        if j != nodo_inicio and j not in nodo_reabastecimiento:
+            return Model.z[j, k] == sum(Model.x[i, j, k] for i in N if i != j)
+        else:
+            return Constraint.Skip
 
-# Restricción para inicializar la variable auxiliar z si un trabajador k visita el nodo j
-""" Asegurar que z[j, k] = 1 si el nodo j es visitado por el vehículo k y z[j, k] = 0 en caso contrario. """
-def def_z(Model, j, k):
-    if j != nodo_inicio and j not in nodo_reabastecimiento:
-        return Model.z[j, k] == sum(Model.x[i, j, k] for i in N if i != j)
-    else:
-        return Constraint.Skip
+    Model.relacion_z = Constraint(N, K, rule=def_z)
 
-Model.relacion_z = Constraint(N, K, rule=def_z)
+    # Restricción para inicializar la partición con la varuiable auxiliar z
+    def restriccion_parte_carga(Model, j, k):
+        if j != nodo_inicio and j not in nodo_reabastecimiento:
+            return Model.z[j, k] >= Model.particion[j, k]
+        else:
+            return Constraint.Skip
 
-# Restricción para inicializar la partición con la varuiable auxiliar z
-def restriccion_parte_carga(Model, j, k):
-    if j != nodo_inicio and j not in nodo_reabastecimiento:
-        return Model.z[j, k] >= Model.particion[j, k]
-    else:
-        return Constraint.Skip
+    Model.particion_acumulada = Constraint(N, K, rule=restriccion_parte_carga)
 
-Model.particion_acumulada = Constraint(N, K, rule=restriccion_parte_carga)
+    # Restricción suma de particiones es igual a 1
+    def restriccion_unica_particion(Model, j):
+        if j != nodo_inicio and j not in nodo_reabastecimiento:
+            return sum(Model.particion[j, k] for k in K) == 1
+        else:
+            return Constraint.Skip
 
-# Restricción suma de particiones es igual a 1
-def restriccion_unica_particion(Model, j):
-    if j != nodo_inicio and j not in nodo_reabastecimiento:
-        return sum(Model.particion[j, k] for k in K) == 1
-    else:
-        return Constraint.Skip
-
-Model.unica_particion = Constraint(N, rule=restriccion_unica_particion)
+    Model.unica_particion = Constraint(N, rule=restriccion_unica_particion)
 
 # Carga máxima del vehículo
 def carga_limite(Model, i, k):
@@ -488,13 +670,19 @@ Model.sin_ciclos = Constraint(N, N, K, rule=anti_ciclos)
 
 
 # --------------------------------------------------------------------------------------------------------------------
-# Solución del Multi-TSP
-solver = SolverFactory('glpk')
-results = solver.solve(Model, tee=True)
+# SOLUCIÓN DEL MODELO
+solver = SolverFactory('appsi_highs')
+solver.options['time_limit'] = 60*15
+solver.options['keep_files'] = True
 
-Model.display()
+results = solver.solve(Model, tee=True, load_solutions=False)
 
-if results.solver.status == SolverStatus.ok and results.solver.termination_condition == TerminationCondition.optimal:
+tc = results.solver.termination_condition
+print("Termination condition:", tc)
+print("Solver status         :", results.solver.status)
+
+if tc in (TerminationCondition.feasible, TerminationCondition.optimal, TerminationCondition.maxTimeLimit):
+    Model.solutions.load_from(results)
     print("\n✅ Solución óptima encontrada:")
 
     ruta_tsp = {}
@@ -549,7 +737,7 @@ if results.solver.status == SolverStatus.ok and results.solver.termination_condi
             3: ("Centro de Salud\nLa Esperanza" if coordenadas_reales else "Parque El Virrey"),
             4: ("Ranchería Los Pinos" if coordenadas_reales else "Calle 85 con Carrera 15")
         }
-    else:
+    elif opcion == 2:
         nombres_nodos = {
             1: "CDP",
             2: "C2",
@@ -559,9 +747,22 @@ if results.solver.status == SolverStatus.ok and results.solver.termination_condi
 
         for i in range(1, V+1):
             nombres_nodos[n-V+i] = "CD"
+    elif opcion == 3:
+        nombres_nodos = {
+        }
+
+        for i in range(1, n_initial + 1):
+            if i == 1:
+                nombres_nodos[i] = "CDP"
+            else:
+                nombres_nodos[i] = f"C{i-1}"
+
+        for i in range(1, V+1):
+            nombres_nodos[n_initial+i] = "CD"
 
     # Imprimir rutas
     print("\n  📌 Rutas del Multi-TSP:")
+    registros = []
     for k in K:
         print(f"\n  Vehículo {k} ({Nombre_vehiculo[k-1]}):", end=" ")
         
@@ -605,6 +806,7 @@ if results.solver.status == SolverStatus.ok and results.solver.termination_condi
 
         for i in range(len(recorrido_filtrado)):
             nodo = recorrido_filtrado[i]
+            print(nombres_nodos)
             nombre_nodo = nombres_nodos[1].replace("\n", " ") if nodo in nodo_reabastecimiento else nombres_nodos[nodo].replace("\n", " ")
 
             if i == len(recorrido_filtrado) - 1:
@@ -622,12 +824,22 @@ if results.solver.status == SolverStatus.ok and results.solver.termination_condi
             print("\n  ".join(map(str, recorrido_filtrado)))
             print(f"      📌 Valores de la Ruta:\n")
             print(f"        💰 Costo Total: {costo_vehiculo[k]}")
-            print(f"        📏 Distancia Total: {distancia_vehiculo[k]}")
+            print(f"        📏 Distancia Total: {distancia_vehiculo[k]: .2f}")
             print(f"        ⏳ Tiempo Total: {tiempo_vehiculo[k]}")
-            print(f"        📦 Demanda Abastecida: {demanda_vehiculo[k]}")
+            print(f"        📦 Demanda Abastecida: {demanda_vehiculo[k]: .2f}")
         else:
             Ubicacion = nombres_nodos[nodo_inicio].replace("\n", " ")
             print(f"        📌 Vehículo {Nombre_vehiculo[k-1]} en {Ubicacion}")
+
+        registros.append({
+            'Vehículo': k,
+            'Nombre': Nombre_vehiculo[k-1],
+            'Costo': costo_vehiculo[k],
+            'Distancia': round(distancia_vehiculo[k], 2),
+            'Tiempo': tiempo_vehiculo[k],
+            'Demanda': round(demanda_vehiculo[k], 2),
+            'Recorrido': " -> ".join(str(n) for n in recorrido_filtrado)
+        })
 
     # Cálculo del costo total del sistema
     costo_total = sum(costo_vehiculo.values())
@@ -638,7 +850,21 @@ if results.solver.status == SolverStatus.ok and results.solver.termination_condi
         f"\n 💲 Costo total del sistema: {costo_total: .2f} COP "
         f"\n 📏 Distancia total recorrida: {distancia_total: .2f} Km" 
         f"\n ⏳ Tiempo total de recorrido: {tiempo_total} minutos y Tiempo real: {max(tiempo_vehiculo.values())} minutos" 
-        f"\n 📦 Demanda total abastecida: {demanda_total} Unidades")
+        f"\n 📦 Demanda total abastecida: {demanda_total: .2f} Unidades")
+
+    registros.append({
+        'Vehículo': 'GLOBAL',
+        'Nombre': '',
+        'Costo': costo_total,
+        'Distancia': round(distancia_total, 2),
+        'Tiempo': tiempo_total,
+        'Demanda': round(demanda_total, 2),
+        'Recorrido': ''
+    })
+
+    df = pd.DataFrame(registros)
+    df.to_csv('resultados.csv', index=False, encoding='utf-8-sig')
+    print("\n✅ Resultados guardados en resultados.csv")
 
     # --------------------------------------------------------------------------------------------------------------------
 
@@ -703,7 +929,7 @@ if results.solver.status == SolverStatus.ok and results.solver.termination_condi
     for idx, k in enumerate(K):
         color = colores_vehiculos[k]
         plt.text(
-            x_legend, y_start - (idx * 0.08), f"{Nombre_vehiculo[k - 1]}",
+            x_legend, y_start - (idx * 0.08), f"Vehiculo {Nombre_vehiculo[k - 1]}",
             fontsize=10, bbox=dict(facecolor=color, alpha=0.6, edgecolor='black'), transform=ax.transAxes
         )
 
