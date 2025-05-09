@@ -314,11 +314,39 @@ elif opcion == 3:
     # Parámetros generales
     START_TIME = "07:45"  # Hora de inicio de operaciones (HH:MM)
 
-    # Carga de datos desde CSV
+    # Iniciar la interfaz Flask
+    print("Iniciando la interfaz para cargar los datos...")
+    print("Por favor, suba los archivos CSV en la interfaz y exporte los datos.")
+    from subprocess import Popen
+    import time
+
+    # Ejecutar la interfaz como un proceso separado
+    flask_process = Popen(['python', 'interfaz.py'], cwd=os.path.dirname(__file__))
+
+    # Ruta de los archivos exportados
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    pa1   = os.path.join(script_dir, 'clients.csv')
-    pa2   = os.path.join(script_dir, 'depots.csv')
-    pa3   = os.path.join(script_dir, 'vehicles.csv')
+    pa1 = os.path.join(script_dir, 'uploads', 'clients.csv')
+    pa2 = os.path.join(script_dir, 'uploads', 'depots.csv')
+    pa3 = os.path.join(script_dir, 'uploads', 'vehicles.csv')
+
+    # Esperar a que los archivos sean generados
+    print("Esperando a que los archivos sean generados...")
+    while not (os.path.exists(pa1) and os.path.exists(pa2) and os.path.exists(pa3)):
+        time.sleep(1)
+
+    # Forzar la terminación del proceso Flask
+    flask_process.terminate()
+    flask_process.wait()  # Esperar a que el proceso termine completamente
+    print("Servidor Flask detenido. Continuando con el procesamiento...")
+
+    # Verificar que los archivos hayan sido generados
+    if not (os.path.exists(pa1) and os.path.exists(pa2) and os.path.exists(pa3)):
+        print("❌ Error: No se encontraron los archivos exportados.")
+        exit(1)
+    else:
+        print("Archivos cargados correctamente. Continuando con el procesamiento...")
+
+    # Cargar los datos desde los archivos exportados
     clients_df = pd.read_csv(pa1)
     depots_df = pd.read_csv(pa2)
     vehicles_df = pd.read_csv(pa3)
