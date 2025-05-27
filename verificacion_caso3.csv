@@ -1,0 +1,14 @@
+﻿Vehículo,Nombre,Costo,Distancia,Tiempo,Demanda,Recorrido
+1,1,1054248.0,28.34,3336.02,234.0,"      Ubicaciones recorridas:
+
+      🏠  CDP ->       ➡️  CDP (Reabastecimiento) ⬇️ ->       ➡️  C6 ⬇️ ->       ➡️  C15 ⬇️ ->       ➡️  C17 ⬇️ ->       ➡️  C10 ⬇️ ->       ➡️  C1 ⬇️ ->       ➡️  C16 ⬇️ ->       ➡️  CDP (Reabastecimiento) ⬇️ ->       ➡️  C11 ⬇️ ->       ➡️  C3 ⬇️ ->       ➡️  C8 ⬇️ ->       ➡️  C4 ⬇️ ->       ➡️  C14 ⬇️ ->       ➡️  C5 ⬇️ ->       ➡️  C13 ⬇️ ->     🏠  CDP
+"
+2,2,197098.0,7.48,839.01,23.0,"      Ubicaciones recorridas:
+
+      🏠  CDP ->       ➡️  C7 ⬇️ ->       ➡️  C9 ⬇️ ->       ➡️  C2 ⬇️ ->     🏠  CDP
+"
+3,3,67456.0,2.56,250.01,24.0,"      Ubicaciones recorridas:
+
+      🏠  CDP ->       ➡️  CDP (Reabastecimiento) ⬇️ ->       ➡️  C12 ⬇️ ->     🏠  CDP
+"
+GLOBAL,,1318802.0,38.38,4425.04,281.0,
