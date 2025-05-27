@@ -583,7 +583,7 @@ if activar_ventanas_tiempo:
 # Capacidad de carga acumulada
 def restriccion_carga(Model, i, j, k):
     if i != j and j != nodo_inicio and j not in nodo_reabastecimiento:
-        return Model.carga[j, k] >= Model.carga[i, k] + demanda[j-1] - Capacidad_util[k]*(1 - Model.x[i, j, k])
+        return Model.carga[j, k] >= Model.carga[i, k] + demanda[j-1] - Capacidad_util[k]*(1 - Model.x[i, j, k])*1000
     else:
         return Constraint.Skip
 Model.capacidad_acumulada = Constraint(N, N, K, rule=restriccion_carga)
@@ -631,7 +631,7 @@ Model.carga_limite_veh = Constraint(N,K, rule=carga_limite)
 # Restricción de distancia acumulada
 def restriccion_distancia(Model, i, j, k):
     if i != j and j != nodo_inicio:
-        return Model.distancia[j, k] >= Model.distancia[i, k] + matriz_distancias[i - 1][j - 1][k - 1]*Model.x[i, j, k] - Distancia_util[k] * (1 - Model.x[i, j, k])
+        return Model.distancia[j, k] >= Model.distancia[i, k] + matriz_distancias[i - 1][j - 1][k - 1]*Model.x[i, j, k] - Distancia_util[k] * (1 - Model.x[i, j, k]) * 1000
     else:
         return Constraint.Skip
 
